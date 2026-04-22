@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+env/
+.env
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+*.log
+
+# Build artefacts
+/frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Data (optional — remove if you want to commit your trained model)
+# model/*.pkl
+# data/*.csv
+
+# Secrets
+.env.local
+.env.*.local
