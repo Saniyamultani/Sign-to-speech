@@ -1,139 +1,130 @@
 /**
- * src/hooks/useSignDetector.js
- *
- * Polls the vision service state at 5 Hz.
- * Fires TTS on each NEW confirmed word, deduped via new_word_id so two
- * parallel polls can't double-fire or drop events.
- * Does NOT cancel in-flight speech — words queue naturally.
+ * Backend-powered sign detector — polls /api/sign/status
+ * Uses Python OpenCV/MediaPipe/ONNX (no browser WASM issues)
  */
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { signApi } from '../api/client'
-
-const POLL_INTERVAL = 200
+import { useState, useEffect, useCallback } from 'react'
+import { fixGrammar } from '../ml/grammar'
 
 function speakAppend(text) {
   if (!window.speechSynthesis || !text) return
-  const utt = new SpeechSynthesisUtterance(text)
-  utt.rate = 0.95
-  utt.volume = 1
-  window.speechSynthesis.speak(utt)
+  const u = new SpeechSynthesisUtterance(text)
+  u.rate = 0.95
+  window.speechSynthesis.speak(u)
 }
 
 function speakInterrupt(text) {
   if (!window.speechSynthesis || !text) return
   window.speechSynthesis.cancel()
-  const utt = new SpeechSynthesisUtterance(text)
-  utt.rate = 0.95
-  utt.volume = 1
-  window.speechSynthesis.speak(utt)
+  const u = new SpeechSynthesisUtterance(text)
+  u.rate = 0.95
+  window.speechSynthesis.speak(u)
 }
 
 export function useSignDetector() {
-  const [cameraOn,      setCameraOn]      = useState(false)
-  const [error,         setError]         = useState(null)
+  const [cameraOn, setCameraOn] = useState(false)
+  const [error, setError] = useState(null)
   const [confirmedSign, setConfirmedSign] = useState('Neutral')
-  const [confidence,    setConfidence]    = useState(0)
-  const [allProbs,      setAllProbs]      = useState({})
-  const [words,         setWords]         = useState([])
-  const [raw,           setRaw]           = useState('')
-  const [corrected,     setCorrected]     = useState('')
-  const [isCorrected,   setIsCorrected]   = useState(false)
-  const [lastNewWord,   setLastNewWord]   = useState(null)
-  const [classes,       setClasses]       = useState([])
+  const [confidence, setConfidence] = useState(0)
+  const [allProbs, setAllProbs] = useState({})
+  const [words, setWords] = useState([])
+  const [corrected, setCorrected] = useState('')
+  const [isCorrected, setIsCorrected] = useState(false)
+  const [lastNewWord, setLastNewWord] = useState(null)
+  const [frameSrc, setFrameSrc] = useState(null) // base64 jpeg from backend
 
-  const pollRef           = useRef(null)
-  const lastSeenWordIdRef = useRef(0)
+  const sentence = useRef({ words: [], corrected: '', isCorrected: false })
 
   const startCamera = useCallback(async () => {
     try {
       setError(null)
-      await signApi.start()
+      const res = await fetch('/api/sign/start', { method: 'POST' })
+      if (!res.ok) throw new Error(await res.text())
       setCameraOn(true)
-      try {
-        const c = await signApi.classes()
-        setClasses(c.classes || [])
-      } catch (_) {}
     } catch (e) {
       setError(e.message)
+      setCameraOn(false)
     }
   }, [])
 
   const stopCamera = useCallback(async () => {
-    clearInterval(pollRef.current)
-    try { await signApi.stop() } catch (_) {}
+    try {
+      await fetch('/api/sign/stop', { method: 'POST' })
+    } catch (e) {}
     setCameraOn(false)
     setConfirmedSign('Neutral')
     setConfidence(0)
-    setAllProbs({})
-    if (window.speechSynthesis) window.speechSynthesis.cancel()
+    sentence.current = { words: [], corrected: '', isCorrected: false }
+    setWords([])
+    setCorrected('')
+    setIsCorrected(false)
+    setFrameSrc(null)
+    window.speechSynthesis?.cancel()
   }, [])
 
-  const applyGrammar = useCallback(async () => {
-    try {
-      const res = await signApi.grammar()
-      setCorrected(res.corrected)
-      setIsCorrected(true)
-      speakInterrupt(res.corrected)
-    } catch (e) { setError(e.message) }
+  const applyGrammar = useCallback(() => {
+    const raw = sentence.current.words.join(' ')
+    if (!raw.trim()) return
+    const fixed = fixGrammar(raw)
+    sentence.current.corrected = fixed
+    sentence.current.isCorrected = true
+    setCorrected(fixed)
+    setIsCorrected(true)
+    speakInterrupt(fixed)
   }, [])
 
-  const clearSentence = useCallback(async () => {
-    try {
-      await signApi.clear()
-      setWords([]); setRaw(''); setCorrected(''); setIsCorrected(false)
-      if (window.speechSynthesis) window.speechSynthesis.cancel()
-    } catch (e) { setError(e.message) }
+  const clearSentence = useCallback(() => {
+    sentence.current.words = []
+    setWords([])
+    setCorrected('')
+    setIsCorrected(false)
+    window.speechSynthesis?.cancel()
   }, [])
 
-  const undoWord = useCallback(async () => {
-    try {
-      const res = await signApi.undo()
-      setWords(res.words); setRaw(res.raw)
-      setIsCorrected(false)
-    } catch (e) { setError(e.message) }
+  const undoWord = useCallback(() => {
+    sentence.current.words.pop()
+    setWords([...sentence.current.words])
+    setIsCorrected(false)
   }, [])
-
-  const speakCorrectedAgain = useCallback(() => {
-    if (corrected) speakInterrupt(corrected)
-  }, [corrected])
 
   useEffect(() => {
-    if (!cameraOn) return
-    pollRef.current = setInterval(async () => {
-      try {
-        const s = await signApi.state()
-        setConfirmedSign(s.confirmed_sign)
-        setConfidence(s.confidence)
-        setAllProbs(s.all_probs || {})
-        setWords(s.words)
-        setRaw(s.raw)
-        setCorrected(s.corrected)
-        setIsCorrected(s.is_corrected)
-
-        if (s.error) setError(s.error)
-
-        if (s.new_word && s.new_word_id > lastSeenWordIdRef.current) {
-          lastSeenWordIdRef.current = s.new_word_id
-          setLastNewWord(s.new_word)
-          speakAppend(s.new_word)
-          setTimeout(() => setLastNewWord(null), 1500)
+    let interval = null
+    if (cameraOn) {
+      interval = setInterval(async () => {
+        try {
+          const res = await fetch('/api/sign/state')
+          const state = await res.json()
+          if (state.error) {
+            setError(state.error)
+            setCameraOn(false)
+            return
+          }
+          setConfirmedSign(state.confirmed_sign || 'Neutral')
+          setConfidence(state.confidence || 0)
+          setAllProbs(state.probs || {})
+          setFrameSrc(state.frame_jpeg ? `data:image/jpeg;base64,${state.frame_jpeg}` : null)
+          if (state.new_word) {
+            sentence.current.words.push(state.new_word)
+            setWords([...sentence.current.words])
+            setLastNewWord(state.new_word)
+            speakAppend(state.new_word)
+            setTimeout(() => setLastNewWord(null), 1500)
+            setIsCorrected(false)
+          }
+        } catch (e) {
+          console.error('[backend detector]', e)
         }
-      } catch (e) {
-        setError('Lost connection to backend: ' + e.message)
-      }
-    }, POLL_INTERVAL)
-
-    return () => clearInterval(pollRef.current)
+      }, 100) // 10Hz poll
+    }
+    return () => interval && clearInterval(interval)
   }, [cameraOn])
 
   return {
-    cameraOn,
-    error, setError,
+    cameraOn, error, setError,
     confirmedSign, confidence, allProbs,
-    words, raw, corrected, isCorrected,
-    lastNewWord, classes,
+    words, corrected, isCorrected,
+    lastNewWord, frameSrc,
     startCamera, stopCamera,
-    applyGrammar, clearSentence, undoWord, speakCorrectedAgain,
-    feedUrl: signApi.feedUrl(),
+    applyGrammar, clearSentence, undoWord,
   }
 }
+
