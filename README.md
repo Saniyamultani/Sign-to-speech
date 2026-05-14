@@ -1,4 +1,4 @@
-# Signal — Sign Language Translator v5
+# Signal — Sign Language Translator 
 
 A web-based bi-directional sign language translator.
 
